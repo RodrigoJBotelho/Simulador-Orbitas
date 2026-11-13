@@ -14,13 +14,12 @@ jobs:
       - name: Compilar
         run: make
 
-      - name: Rodar os modelos
-        run: make run
+      - name: Verificar ordens de convergência e conservação de energia
+        run: make teste
 
-      - name: Verificar resultados
+      - name: Conferir que os CSVs foram gerados
         run: |
-          test -s saida/radiacao_espessura.csv
-          test -s saida/reentrada_perfil.csv
-          err=$(cd saida && ../bin/calor1d | grep "perfil final" | sed -E 's/.*CN=([0-9.eE+-]+) K.*/\1/')
-          echo "Erro CN: $err K"
-          awk -v e="$err" 'BEGIN { exit !(e < 1.0) }'
+          test -s saida/orbita_trajetoria.csv
+          test -s saida/orbita_energia.csv
+          test -s saida/orbita_convergencia.csv
+          test -s saida/orbita_convergencia_energia.csv
