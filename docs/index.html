@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador de órbitas: visualizador de resultados</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1b1f; --muted: #5b5b66; --grid: #dcdce3;
+    --panel: #f5f5f8; --accent: #0072B2; --terra: #9ec5e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --fg: #ececf1; --muted: #a0a0ad; --grid: #34343d;
+      --panel: #202027; --accent: #56B4E9; --terra: #2c5a82;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--fg); line-height: 1.5; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+              background: var(--panel); padding: 12px; border-radius: 8px; margin-bottom: 12px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 10px; font-size: .9rem; }
+  button, label.file { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+              border: 1px solid var(--grid); background: var(--bg); color: var(--fg); }
+  button:hover, label.file:hover { border-color: var(--accent); }
+  button:focus-visible, label.file:focus-within, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input[type=file] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  #msg { color: var(--muted); font-size: .9rem; min-height: 1.4em; margin: 0 0 8px; }
+  #title { font-weight: 600; margin: 0 0 6px; }
+  canvas { width: 100%; height: 400px; display: block; background: var(--bg);
+           border: 1px solid var(--grid); border-radius: 8px; }
+  ul#legend { list-style: none; padding: 0; margin: 10px 0 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  ul#legend li { display: flex; align-items: center; gap: 6px; font-size: .9rem; }
+  ul#legend svg { width: 28px; height: 10px; }
+  details { margin-top: 16px; }
+  table { border-collapse: collapse; font-size: .85rem; display: block; overflow-x: auto; }
+  th, td { padding: 3px 10px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Simulador de órbitas</h1>
+  <p class="sub">Visualize os CSVs gerados por <code>orbitas</code>: trajetórias, erro de energia e convergência.
+     Não é preciso instalar nada.</p>
+
+  <div class="controls">
+    <strong>Exemplos:</strong>
+    <button data-ex="exemplos/orbita_trajetoria.csv">Trajetórias</button>
+    <button data-ex="exemplos/orbita_energia.csv">Erro de energia</button>
+    <button data-ex="exemplos/orbita_convergencia.csv">Convergência (posição)</button>
+    <button data-ex="exemplos/orbita_convergencia_energia.csv">Convergência (energia)</button>
+    <label class="file">Abrir meu CSV<input type="file" id="arquivo" accept=".csv,text/csv"></label>
+  </div>
+
+  <div class="opts">
+    <label><input type="checkbox" id="logx"> Escala log no eixo X</label>
+    <label><input type="checkbox" id="logy"> Escala log no eixo Y</label>
+  </div>
+
+  <p id="msg" role="status" aria-live="polite">Escolha um exemplo ou abra um CSV.
+     Colunas <code>x_nome</code>/<code>y_nome</code> viram trajetórias; nos demais casos a 1ª coluna é o eixo X.</p>
+  <p id="title"></p>
+  <canvas id="grafico" role="img" aria-label="Gráfico dos dados carregados"></canvas>
+  <ul id="legend"></ul>
+
+  <details>
+    <summary>Ver tabela (primeiras linhas)</summary>
+    <table id="tabela"></table>
+  </details>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var CORES = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#E69F00', '#56B4E9'];
+  var TRACOS = [[], [8, 4], [2, 3], [10, 3, 2, 3], [], [6, 2]];
+  var RAIO_TERRA_KM = 6371;
+  var canvas = document.getElementById('grafico');
+  var ctx = canvas.getContext('2d');
+  var estado = null;   // {cab, dados, modo, series:[{nome, ix, iy}]}
+
+  function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+  function lerCSV(texto) {
+    var linhas = texto.replace(/\r/g, '').split('\n').filter(function (l) { return l.trim() !== ''; });
+    if (linhas.length < 2) throw new Error('CSV vazio ou sem dados.');
+    var cab = linhas[0].split(',').map(function (s) { return s.trim(); });
+    var dados = linhas.slice(1).map(function (l) { return l.split(',').map(parseFloat); });
+    return { cab: cab, dados: dados };
+  }
+
+  // Detecta pares x_nome / y_nome (modo trajetória) ou usa 1ª coluna como X
+  function montarSeries(cab) {
+    var pares = [];
+    cab.forEach(function (c, i) {
+      if (c.indexOf('x_') === 0) {
+        var j = cab.indexOf('y_' + c.slice(2));
+        if (j >= 0) pares.push({ nome: c.slice(2), ix: i, iy: j });
+      }
+    });
+    if (pares.length) return { modo: 'xy', series: pares, xlabel: 'x (km)', ylabel: 'y (km)' };
+    var s = [];
+    for (var k = 1; k < cab.length; k++) s.push({ nome: cab[k], ix: 0, iy: k });
+    return { modo: 'xt', series: s, xlabel: cab[0], ylabel: '' };
+  }
+
+  function tf(v, log) { return log ? (v > 0 ? Math.log10(v) : NaN) : v; }
+
+  function ticksLin(min, max, n) {
+    if (min === max) { min -= 1; max += 1; }
+    var bruto = (max - min) / n, mag = Math.pow(10, Math.floor(Math.log10(bruto))), norm = bruto / mag;
+    var passo = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag, out = [];
+    for (var v = Math.ceil(min / passo) * passo; v <= max + passo * 1e-9; v += passo) out.push(+v.toPrecision(12));
+    return { valores: out, passo: passo };
+  }
+  function ticksLog(min, max) {
+    var out = [], passo = Math.max(1, Math.ceil((max - min) / 8));
+    for (var e = Math.ceil(min); e <= max; e += passo) out.push(e);
+    return { valores: out, passo: 1 };
+  }
+  function rotulo(v, passo, log) {
+    if (log) return '1e' + v;
+    var casas = Math.max(0, -Math.floor(Math.log10(passo)));
+    if (Math.abs(v) >= 1e5 || (v !== 0 && Math.abs(v) < 1e-3)) return v.toExponential(1);
+    return v.toFixed(Math.min(casas, 6));
+  }
+
+  function desenhar() {
+    if (!estado) return;
+    var logx = document.getElementById('logx').checked && estado.modo === 'xt';
+    var logy = document.getElementById('logy').checked && estado.modo === 'xt';
+    var dpr = window.devicePixelRatio || 1;
+    var w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var dados = estado.dados, series = estado.series;
+    var ml = 64, mr = 16, mt = 12, mb = 44;
+    var xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+
+    function acumula(ix, iy) {
+      for (var i = 0; i < dados.length; i++) {
+        var x = tf(dados[i][ix], logx), y = tf(dados[i][iy], logy);
+        if (!isFinite(x) || !isFinite(y) || Math.abs(y) > 1e300) continue;
+        if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+        if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+      }
+    }
+    if (estado.modo === 'xy') {
+      acumula(series[0].ix, series[0].iy);                  // limites pela 1ª série (solução exata)
+      var cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2;
+      var meio = Math.max(xmax - xmin, ymax - ymin) / 2 * 1.15;
+      var aw = w - ml - mr, ah = h - mt - mb;
+      var halfX = meio, halfY = meio;
+      if (aw > ah) halfX = meio * aw / ah; else halfY = meio * ah / aw;   // escala igual nos dois eixos
+      xmin = cx - halfX; xmax = cx + halfX; ymin = cy - halfY; ymax = cy + halfY;
+    } else {
+      series.forEach(function (s) { acumula(s.ix, s.iy); });
+      if (!isFinite(ymin)) { ymin = 0; ymax = 1; xmin = 0; xmax = 1; }
+      if (logy) { ymin = Math.floor(ymin); ymax = Math.ceil(ymax); }
+      else { var pad = (ymax - ymin) * 0.05 || 1; ymin -= pad; ymax += pad; }
+      if (logx) { xmin = Math.floor(xmin); xmax = Math.ceil(xmax); }
+    }
+    var tx = logx ? ticksLog(xmin, xmax) : ticksLin(xmin, xmax, 6);
+    var ty = logy ? ticksLog(ymin, ymax) : ticksLin(ymin, ymax, 6);
+    function X(v) { return ml + (v - xmin) / ((xmax - xmin) || 1) * (w - ml - mr); }
+    function Y(v) { return h - mb - (v - ymin) / ((ymax - ymin) || 1) * (h - mt - mb); }
+
+    var grid = css('--grid'), fg = css('--fg'), muted = css('--muted');
+    ctx.font = '12px system-ui, sans-serif'; ctx.lineWidth = 1;
+    ctx.strokeStyle = grid; ctx.fillStyle = muted;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ty.valores.forEach(function (v) {
+      ctx.beginPath(); ctx.moveTo(ml, Y(v)); ctx.lineTo(w - mr, Y(v)); ctx.stroke();
+      ctx.fillText(rotulo(v, ty.passo, logy), ml - 6, Y(v));
+    });
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    tx.valores.forEach(function (v) {
+      ctx.beginPath(); ctx.moveTo(X(v), mt); ctx.lineTo(X(v), h - mb); ctx.stroke();
+      ctx.fillText(rotulo(v, tx.passo, logx), X(v), h - mb + 6);
+    });
+    ctx.fillStyle = fg;
+    ctx.fillText(estado.modo === 'xy' ? estado.xlabel : estado.cab[estado.series[0].ix], ml + (w - ml - mr) / 2, h - 18);
+
+    ctx.save();
+    ctx.beginPath(); ctx.rect(ml, mt, w - ml - mr, h - mt - mb); ctx.clip();
+
+    if (estado.modo === 'xy') {            // a Terra, no foco (origem)
+      var rpx = RAIO_TERRA_KM / (xmax - xmin) * (w - ml - mr);
+      ctx.fillStyle = css('--terra');
+      ctx.beginPath(); ctx.arc(X(0), Y(0), rpx, 0, 2 * Math.PI); ctx.fill();
+    }
+    series.forEach(function (s, idx) {
+      ctx.strokeStyle = CORES[idx % CORES.length];
+      ctx.setLineDash(TRACOS[idx % TRACOS.length]);
+      ctx.lineWidth = 2; ctx.beginPath();
+      var aberto = false;
+      for (var k = 0; k < dados.length; k++) {
+        var x = tf(dados[k][s.ix], logx), y = tf(dados[k][s.iy], logy);
+        if (!isFinite(x) || !isFinite(y) || Math.abs(y) > 1e300) { aberto = false; continue; }
+        if (!aberto) { ctx.moveTo(X(x), Y(y)); aberto = true; } else ctx.lineTo(X(x), Y(y));
+      }
+      ctx.stroke();
+    });
+    ctx.restore();
+    ctx.setLineDash([]);
+  }
+
+  function legenda() {
+    var ul = document.getElementById('legend');
+    ul.innerHTML = '';
+    estado.series.forEach(function (s, idx) {
+      var li = document.createElement('li');
+      li.innerHTML = '<svg viewBox="0 0 28 10" aria-hidden="true"><line x1="0" y1="5" x2="28" y2="5" stroke="' +
+        CORES[idx % CORES.length] + '" stroke-width="2.5" stroke-dasharray="' + TRACOS[idx % TRACOS.length].join(' ') + '"/></svg>';
+      var sp = document.createElement('span'); sp.textContent = s.nome; li.appendChild(sp); ul.appendChild(li);
+    });
+  }
+
+  function tabela() {
+    var t = document.getElementById('tabela'); t.innerHTML = '';
+    var tr0 = document.createElement('tr');
+    estado.cab.forEach(function (c) { var th = document.createElement('th'); th.textContent = c; tr0.appendChild(th); });
+    t.appendChild(tr0);
+    estado.dados.slice(0, 20).forEach(function (r) {
+      var tr = document.createElement('tr');
+      r.forEach(function (v) {
+        var td = document.createElement('td');
+        td.textContent = isFinite(v) ? (+v.toPrecision(6)).toString() : '—';
+        tr.appendChild(td);
+      });
+      t.appendChild(tr);
+    });
+  }
+
+  function mostrar(texto, nome) {
+    try {
+      var csv = lerCSV(texto);
+      var m = montarSeries(csv.cab);
+      estado = { cab: csv.cab, dados: csv.dados, modo: m.modo, series: m.series, xlabel: m.xlabel };
+      // escalas log sugeridas
+      var primeira = csv.cab[0];
+      var sugLogX = primeira === 'passos_por_orbita';
+      var sugLogY = sugLogX || csv.cab.indexOf('t_orbitas') === 0;
+      document.getElementById('logx').checked = sugLogX;
+      document.getElementById('logy').checked = sugLogY;
+      document.getElementById('logx').disabled = m.modo === 'xy';
+      document.getElementById('logy').disabled = m.modo === 'xy';
+      document.getElementById('title').textContent = nome;
+      document.getElementById('msg').textContent = csv.dados.length + ' linhas, ' + m.series.length +
+        ' série(s)' + (m.modo === 'xy' ? ' (trajetórias; Terra em azul no foco)' : '') + '.';
+      canvas.setAttribute('aria-label', 'Gráfico: ' + m.series.map(function (s) { return s.nome; }).join(', '));
+      legenda(); tabela(); desenhar();
+    } catch (e) {
+      document.getElementById('msg').textContent = 'Erro: ' + e.message;
+    }
+  }
+
+  document.querySelectorAll('button[data-ex]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var url = b.getAttribute('data-ex');
+      fetch(url).then(function (r) {
+        if (!r.ok) throw new Error('falha ao carregar');
+        return r.text();
+      }).then(function (t) { mostrar(t, b.textContent); })
+        .catch(function () {
+          document.getElementById('msg').textContent =
+            'Os exemplos só carregam quando a página é servida (GitHub Pages). ' +
+            'Abrindo o arquivo direto no computador, use "Abrir meu CSV" e escolha um arquivo de docs/exemplos.';
+        });
+    });
+  });
+
+  document.getElementById('arquivo').addEventListener('change', function (ev) {
+    var f = ev.target.files[0]; if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () { mostrar(String(rd.result), f.name); };
+    rd.readAsText(f);
+  });
+  document.getElementById('logx').addEventListener('change', desenhar);
+  document.getElementById('logy').addEventListener('change', desenhar);
+  window.addEventListener('resize', desenhar);
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    if (mq.addEventListener) mq.addEventListener('change', desenhar);
+  }
+})();
+</script>
+</body>
+</html>
